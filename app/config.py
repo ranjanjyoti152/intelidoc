@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     
     # API Configuration
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 9060
     
     # Legacy support: map old llm_model to appropriate provider model
     llm_model: Optional[str] = Field(default=None, description="Deprecated: use provider-specific model settings")

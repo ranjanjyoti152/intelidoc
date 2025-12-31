@@ -1,5 +1,5 @@
-# PostgreSQL Initialization Script for RAG Pipeline
-# This script runs automatically when the container is first created
+-- PostgreSQL Initialization Script for RAG Pipeline
+-- This script runs automatically when the container is first created
 
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;

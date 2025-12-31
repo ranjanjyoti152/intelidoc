@@ -88,9 +88,23 @@ const Icons = {
       <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
     </svg>
   ),
+  Gpu: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <line x1="9" y1="1" x2="9" y2="4" />
+      <line x1="15" y1="1" x2="15" y2="4" />
+      <line x1="9" y1="20" x2="9" y2="23" />
+      <line x1="15" y1="20" x2="15" y2="23" />
+      <line x1="20" y1="9" x2="23" y2="9" />
+      <line x1="20" y1="15" x2="23" y2="15" />
+      <line x1="1" y1="9" x2="4" y2="9" />
+      <line x1="1" y1="15" x2="4" y2="15" />
+    </svg>
+  ),
 };
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = 'http://localhost:9060';
 
 // Generate unique ID
 const generateId = () => Math.random().toString(36).substr(2, 9);
@@ -118,6 +132,7 @@ function App() {
   const [documents, setDocuments] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [processingDocs, setProcessingDocs] = useState(new Map()); // Track processing documents
+  const [gpuStats, setGpuStats] = useState(null); // GPU utilization stats
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -169,7 +184,7 @@ function App() {
     }
   }, []);
 
-  // Poll for document processing status
+  // Poll for document processing status (fallback when WebSocket is not connected)
   const pollDocumentStatus = useCallback(async (docId, filename) => {
     const maxAttempts = 60; // 5 minutes max (5s intervals)
     let attempts = 0;
@@ -216,9 +231,124 @@ function App() {
     poll();
   }, [fetchDocuments]);
 
+  // WebSocket connection for real-time updates
+  const wsRef = useRef(null);
+  const [wsConnected, setWsConnected] = useState(false);
+
+  useEffect(() => {
+    // Connect to WebSocket
+    const wsUrl = API_BASE.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/documents';
+    console.log('Connecting to WebSocket:', wsUrl);
+
+    const connect = () => {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('WebSocket connected');
+        setWsConnected(true);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === 'document_status') {
+            console.log('Document status update:', data);
+
+            // Update pending files
+            setPendingFiles(prev => prev.map(f => {
+              if (f.docId === data.document_id) {
+                return {
+                  ...f,
+                  status: data.status === 'completed' ? 'complete' : data.status,
+                  progress: data.progress,
+                  error: data.error || null
+                };
+              }
+              return f;
+            }));
+
+            // Update processing docs
+            setProcessingDocs(prev => {
+              const newMap = new Map(prev);
+              if (data.status === 'completed') {
+                newMap.delete(data.document_id);
+                // Refresh documents list
+                fetchDocuments();
+              } else if (data.status === 'failed') {
+                newMap.set(data.document_id, {
+                  name: data.filename,
+                  status: 'failed',
+                  progress: 0,
+                  error: data.error
+                });
+              } else {
+                newMap.set(data.document_id, {
+                  name: data.filename,
+                  status: data.status,
+                  progress: data.progress,
+                  message: data.message
+                });
+              }
+              return newMap;
+            });
+
+            // Remove from pending files after completion
+            if (data.status === 'completed' || data.status === 'failed') {
+              setTimeout(() => {
+                setPendingFiles(prev => prev.filter(f => f.docId !== data.document_id));
+              }, 2000);
+            }
+          }
+        } catch (err) {
+          console.error('WebSocket message parse error:', err);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket disconnected, reconnecting in 3s...');
+        setWsConnected(false);
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        ws.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [fetchDocuments]);
+
   useEffect(() => {
     fetchDocuments();
   }, [fetchDocuments]);
+
+  // Fetch GPU stats periodically
+  useEffect(() => {
+    const fetchGpuStats = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/stats/gpu`);
+        const data = await res.json();
+        if (data.available && data.gpus && data.gpus.length > 0) {
+          setGpuStats(data.gpus[0]); // Use first GPU
+        }
+      } catch (err) {
+        console.error('Failed to fetch GPU stats:', err);
+      }
+    };
+
+    fetchGpuStats();
+    const interval = setInterval(fetchGpuStats, 2000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Create new chat
   const createNewChat = () => {
@@ -544,6 +674,13 @@ function App() {
             <Icons.Sparkles /> InteliDoc
           </h1>
           <div className="header-actions">
+            {gpuStats && (
+              <div className="gpu-stats" title={`${gpuStats.name} - ${gpuStats.temperature}°C`}>
+                <Icons.Gpu />
+                <span className="gpu-util">{gpuStats.utilization}%</span>
+                <span className="gpu-mem">{Math.round(gpuStats.memory_used / 1024)}GB/{Math.round(gpuStats.memory_total / 1024)}GB</span>
+              </div>
+            )}
             <button className="header-btn" onClick={() => { setShowDocsModal(true); fetchDocuments(); }}>
               <Icons.Folder /> Documents ({documents.filter(d => d.status === 'completed').length})
             </button>

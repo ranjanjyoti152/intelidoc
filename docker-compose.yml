@@ -82,7 +82,7 @@ services:
       - ./uploads:/app/uploads
       - model_cache:/root/.cache
     ports:
-      - "8000:8000"
+      - "9060:9060"
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
@@ -117,7 +117,7 @@ services:
       docling:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9060/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5

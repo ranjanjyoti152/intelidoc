@@ -9,7 +9,7 @@ import logging
 
 from app.config import get_settings
 from app.database import init_db, close_db
-from app.routes import documents, query
+from app.routes import documents, query, websocket, stats
 
 
 # Configure logging
@@ -89,6 +89,8 @@ app.add_middleware(
 # Include routers
 app.include_router(documents.router)
 app.include_router(query.router)
+app.include_router(websocket.router)
+app.include_router(stats.router)
 
 
 @app.get("/")

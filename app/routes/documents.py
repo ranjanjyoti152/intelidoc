@@ -50,69 +50,141 @@ async def process_document_task(
     - Stores in vector database
     """
     from app.database import get_db_session
+    from app.routes.websocket import broadcast_document_status
     
-    async with get_db_session() as session:
-        vector_store = VectorStore(session)
-        docling_client = get_docling_client()
-        embedding_service = get_embedding_service()
-        
-        try:
-            # Update status to processing
-            await vector_store.update_document_status(document_id, "processing")
+    logger.info(f"Background task started for document {document_id}")
+    
+    try:
+        async with get_db_session() as session:
+            logger.info(f"Got database session for document {document_id}")
+            vector_store = VectorStore(session)
+            docling_client = get_docling_client()
+            embedding_service = get_embedding_service()
             
-            # Read file content
-            async with aiofiles.open(file_path, "rb") as f:
-                file_content = await f.read()
-            
-            # Process document with Docling
-            logger.info(f"Processing document {document_id} with Docling...")
-            processed_chunks = await docling_client.process_document(
-                file_content=file_content,
-                filename=original_filename,
-                content_type=content_type,
-            )
-            
-            if not processed_chunks:
+            try:
+                # Update status to processing
+                logger.info(f"Updating status to processing for document {document_id}")
+                await vector_store.update_document_status(document_id, "processing")
+                await broadcast_document_status(
+                    document_id=document_id,
+                    status="processing",
+                    filename=original_filename,
+                    progress=10,
+                    message="Starting document processing..."
+                )
+                
+                # Read file content
+                logger.info(f"Reading file content for document {document_id}")
+                async with aiofiles.open(file_path, "rb") as f:
+                    file_content = await f.read()
+                logger.info(f"Read {len(file_content)} bytes for document {document_id}")
+                
+                # Process document with Docling
+                logger.info(f"Calling Docling for document {document_id}...")
+                await broadcast_document_status(
+                    document_id=document_id,
+                    status="processing",
+                    filename=original_filename,
+                    progress=20,
+                    message="Parsing document with Docling..."
+                )
+                
+                processed_chunks = await docling_client.process_document(
+                    file_content=file_content,
+                    filename=original_filename,
+                    content_type=content_type,
+                )
+                logger.info(f"Docling returned {len(processed_chunks) if processed_chunks else 0} chunks for document {document_id}")
+                
+                if not processed_chunks:
+                    logger.warning(f"No chunks extracted for document {document_id}")
+                    await vector_store.update_document_status(
+                        document_id, "failed", error_message="No text content extracted from document"
+                    )
+                    await broadcast_document_status(
+                        document_id=document_id,
+                        status="failed",
+                        filename=original_filename,
+                        progress=0,
+                        error="No text content extracted from document"
+                    )
+                    return
+                
+                # Generate embeddings
+                logger.info(f"Generating embeddings for {len(processed_chunks)} chunks...")
+                await broadcast_document_status(
+                    document_id=document_id,
+                    status="processing",
+                    filename=original_filename,
+                    progress=60,
+                    message=f"Generating embeddings for {len(processed_chunks)} chunks..."
+                )
+                
+                texts = [chunk.content for chunk in processed_chunks]
+                embeddings = embedding_service.embed_texts(texts)
+                logger.info(f"Generated {len(embeddings)} embeddings for document {document_id}")
+                
+                # Prepare chunk data
+                await broadcast_document_status(
+                    document_id=document_id,
+                    status="processing",
+                    filename=original_filename,
+                    progress=80,
+                    message="Storing chunks in database..."
+                )
+                
+                chunks_data = [
+                    (
+                        chunk.content,
+                        embedding,
+                        chunk.page_number,
+                        chunk.metadata,
+                    )
+                    for chunk, embedding in zip(processed_chunks, embeddings)
+                ]
+                
+                # Store chunks with embeddings
+                logger.info(f"Storing {len(chunks_data)} chunks for document {document_id}")
+                chunk_count = await vector_store.store_chunks(document_id, chunks_data)
+                logger.info(f"Stored {chunk_count} chunks for document {document_id}")
+                
+                # Get page count if available
+                page_numbers = [c.page_number for c in processed_chunks if c.page_number]
+                page_count = max(page_numbers) if page_numbers else None
+                
+                # Update document status
                 await vector_store.update_document_status(
-                    document_id, "failed", error_message="No text content extracted from document"
+                    document_id, "completed", page_count=page_count
                 )
-                return
-            
-            # Generate embeddings
-            logger.info(f"Generating embeddings for {len(processed_chunks)} chunks...")
-            texts = [chunk.content for chunk in processed_chunks]
-            embeddings = embedding_service.embed_texts(texts)
-            
-            # Prepare chunk data
-            chunks_data = [
-                (
-                    chunk.content,
-                    embedding,
-                    chunk.page_number,
-                    chunk.metadata,
+                
+                await broadcast_document_status(
+                    document_id=document_id,
+                    status="completed",
+                    filename=original_filename,
+                    progress=100,
+                    message="Document processed successfully!",
+                    chunk_count=chunk_count
                 )
-                for chunk, embedding in zip(processed_chunks, embeddings)
-            ]
-            
-            # Store chunks with embeddings
-            chunk_count = await vector_store.store_chunks(document_id, chunks_data)
-            
-            # Get page count if available
-            page_numbers = [c.page_number for c in processed_chunks if c.page_number]
-            page_count = max(page_numbers) if page_numbers else None
-            
-            # Update document status
-            await vector_store.update_document_status(
-                document_id, "completed", page_count=page_count
-            )
-            
-            logger.info(f"Document {document_id} processed successfully with {chunk_count} chunks")
-            
-        except Exception as e:
-            logger.error(f"Error processing document {document_id}: {e}")
-            await vector_store.update_document_status(
-                document_id, "failed", error_message=str(e)
-            )
+                
+                logger.info(f"Document {document_id} processed successfully with {chunk_count} chunks")
+                
+            except Exception as e:
+                logger.error(f"Error processing document {document_id}: {e}", exc_info=True)
+                try:
+                    await vector_store.update_document_status(
+                        document_id, "failed", error_message=str(e)
+                    )
+                    await broadcast_document_status(
+                        document_id=document_id,
+                        status="failed",
+                        filename=original_filename,
+                        progress=0,
+                        error=str(e)
+                    )
+                except Exception as update_err:
+                    logger.error(f"Failed to update error status for document {document_id}: {update_err}")
+    except Exception as outer_err:
+        logger.error(f"Outer error in background task for document {document_id}: {outer_err}", exc_info=True)
 
 
 @router.post("/upload", response_model=UploadResponse)
